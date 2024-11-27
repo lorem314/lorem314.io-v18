@@ -1,0 +1,208 @@
+---
+title: "NodeJS 中的事件循环 第 3 部分 — Promise, nextTick 和 Immediate"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-10-29
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote variant="original-link">
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/promises-next-ticks-and-immediates-nodejs-event-loop-part-3-9226cbe7a6aa"
+>
+  Promises, Next-Ticks, and Immediates — NodeJS Event Loop Part 3
+</a>
+
+</blockquote>
+
+在该小节中，我们主要讲解事件循环中的 Promise 和 nextTick 回调。
+
+<Section title="原生 Promise">
+
+> 之前也提到过，第 11 版本的 Node 中的改动极大地改变了内部`nextTick`、`Promise`、`setImmediate`和`setTimerout`的行为。  
+> [https://medium.com/@dpjayasekara/new-changes-to-timers-and-microtasks-from-node-v11-0-0-and-above-68d112743eb3](https://medium.com/@dpjayasekara/new-changes-to-timers-and-microtasks-from-node-v11-0-0-and-above-68d112743eb3)
+
+再来看一下这张图，Promise 回调属于微队列中的任务，将于 nextTick 回调之后执行。
+
+![NodeJS事件循环](/blogs/NodeJS中的事件循环1/nodejs-event-loop.jpg)
+
+考虑如下代码：
+
+```js noLineNumber
+Promise.resolve().then(() => console.log("promise1 resolved"))
+Promise.resolve().then(() => console.log("promise2 resolved"))
+Promise.resolve().then(() => {
+  console.log("promise3 resolved")
+  process.nextTick(() =>
+    console.log("next tick inside promise resolve handler")
+  )
+})
+Promise.resolve().then(() => console.log("promise4 resolved"))
+Promise.resolve().then(() => console.log("promise5 resolved"))
+
+setImmediate(() => console.log("set immediate1"))
+setImmediate(() => console.log("set immediate2"))
+
+process.nextTick(() => console.log("next tick1"))
+process.nextTick(() => console.log("next tick2"))
+process.nextTick(() => console.log("next tick3"))
+
+setTimeout(() => console.log("set timeout"), 0)
+setImmediate(() => console.log("set immediate3"))
+setImmediate(() => console.log("set immediate4"))
+```
+
+执行流程如下：
+
+1. 首先是 5 个 promise 回调，被加入到 promise 微队列中。
+2. 其次是 2 个 immediate 回调。
+3. 然后又有 3 个 nextTick 回调。
+4. 1 个过期时间设置为 0 毫秒的 timer，将会马上过期，回调被添加到 timer 队列中
+5. 又添加了 2 个 immediate 回调
+
+之后，事件循环开始检查 nextTick 队列
+
+1. 检查到有 3 个 nextTick 事件，Node 会执行它们，直到全部执行完毕。
+2. 之后事件循环检查 Promise 队列，有 5 个
+3. 在第 3 个 promise 回调中，又向 nextTick 中添加了一个回调
+4. promise 微队列结束后，事件循环又会注意到，nextTick 中还有一个回调未被执行，执行该回调函数。
+5. 之后微队列中没有回调了，事件循环移动到下一个阶段，timer 阶段。检查到有过期的 timer 事件，开始执行这些事件。
+6. 处理完了 timer 阶段，事件循环将会等待 IO 事件，目前并没有 IO 事件，继续移动到下一个阶段，immediate 阶段。检查到有 4 个事件，之后执行。
+7. 最后，没有任何事件了，程序退出
+
+输出结果如下：
+
+```shell noLineNumber
+next tick1
+next tick2
+next tick3
+promise1 resolved
+promise2 resolved
+promise3 resolved
+promise4 resolved
+promise5 resolved
+next tick inside promise resolve handler
+set timeout
+set immediate1
+set immediate2
+set immediate3
+set immediate4
+```
+
+</Section>
+
+<Section title="Q 和 Bluebird">
+
+现在我们了解了，无论 Promise 被 resolve 还是 reject，其回调都会被作为微任务，在事件循环检查下一个阶段前被运行。那 Q 和 Bluebird 呢？
+
+> Q 和 Bluebird 均为在原生 Promise 被广泛支持之前诞生的类 Promise 库。由于这些库的诞生早于原生 Promise，也就有着不同的行为。
+
+在本文撰写的时间点(2017-07-22)，Q(v1.5.0) 使用 nextTick 队列来安排自身的 promise 回调。根据 Q 的官方解释：
+
+> Promise 始终是异步的，无论是被 resolve 还是 reject，其回调都会在事件循环的下一轮中被调用。
+
+另一方面，Bluebird(v3.5.0) 使用 setImmediate 安排自身 promise 回调。
+
+我们通过具体的代码来更详细的解释：
+
+```js noLineNumber
+const Q = require("q")
+const BlueBird = require("bluebird")
+
+Promise.resolve().then(() => console.log("native promise resolved"))
+
+BlueBird.resolve().then(() => console.log("bluebird promise resolved"))
+
+setImmediate(() => console.log("set immediate"))
+
+Q.resolve().then(() => console.log("q promise resolved"))
+
+process.nextTick(() => console.log("next tick"))
+
+setTimeout(() => console.log("set timeout"), 0)
+```
+
+由于 Bluebird 内部使用的是 setImmediate，因此其回调的执行顺序等同于 SetImmediate 的回调，同理，Q 回调的执行先后顺序和 nextTick 一样。我们可以得出如下输出顺序：
+
+```shell noLineNumber
+q promise resolved
+next tick
+native promise resolved
+set timeout
+bluebird promise resolved
+set immediate
+```
+
+在 Bluebird 库中，我们可以传入一个调度函数，之后所有的 promise 均会由该函数调度。如下，我们可以设置 Bluebird 使用 nextTick 来调度。
+
+```js noLineNumber
+const BlueBird = require("bluebird")
+BlueBird.setScheduler(process.nextTick)
+```
+
+或是设置为使用 setTimeout 来调度
+
+```js noLineNumber
+const BlueBird = require("bluebird")
+BlueBird.setScheduler((fn) => {
+  setTimeout(fn, 0)
+})
+```
+
+用 setImmediate 代替 nextTick 作为 Bluebird 默认调度函数，在新版本 Node 中会有一定优势。由于 Node 0.12 版本之后移除了用于设置最大递归调用上线的 process.maxTickDepth 参数，使用 setImmediate 可以防止事件循环卡死。
+
+</Section>
+
+<Section title="最后的脑筋急转弯">
+
+考虑如下代码：
+
+```js noLineNumber
+const Q = require("q")
+const BlueBird = require("bluebird")
+
+Promise.resolve().then(() => console.log("native promise resolved"))
+
+BlueBird.resolve().then(() => console.log("bluebird promise resolved"))
+
+setImmediate(() => console.log("set immediate"))
+
+Q.resolve().then(() => console.log("q promise resolved"))
+
+process.nextTick(() => console.log("next tick"))
+
+setTimeout(() => console.log("set timeout"), 0)
+
+Q.reject().catch(() => console.log("q promise rejected"))
+
+BlueBird.reject().catch(() => console.log("bluebird promise rejected"))
+
+Promise.reject().catch(() => console.log("native promise rejected"))
+```
+
+输出结果如下：
+
+```shell
+q promise resolved
+q promise rejected
+next tick
+native promise resolved
+native promise rejected
+set timeout
+bluebird promise resolved
+bluebird promise rejected
+set immediate
+```
+
+现在你应该会有如下两个疑问：
+
+1. Q 内部使用 nextTick 调度，但为何 q promise rejected 会先于 next tick
+2. Bluebird 内部使用 setImmediate，但为何 bluebird promise rejected 会先于 set immediate
+
+这是因为这两个库在内部数据结构中对 resolved 或 rejected 的 Promise 回调进行内部排队，并使用 process.nextTick 或 setImmediate 一次性处理数据结构中的所有回调。
+
+</Section>

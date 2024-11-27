@@ -1,0 +1,249 @@
+---
+title: "NodeJS 中的事件循环 第 2 部分 — Timer, Immediate 和 process.nextTick"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-10-22
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote>
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/timers-immediates-and-process-nexttick-nodejs-event-loop-part-2-2c53fd511bb3"
+>
+  Timers, Immediates and Process.nextTick — NodeJS Event Loop Part 2
+</a>
+
+</blockquote>
+
+在这篇文章中，我们主要详细讲解三个重要的队列，`timer`、`immediate` 和 `process.nextTick`。
+
+<Section title="NextTick队列">
+
+让我们重新回顾一下这张事件循环的图。
+
+![NodeJS事件循环](/blogs/NodeJS中的事件循环1/nodejs-event-loop-overview.jpg)
+
+不同于其他四个步骤，`nextTick` 被单独列在了中间。这是因为它不是由 libuv 实现，而是在 Node 中实现的。
+
+事件循环中的每个阶段之前(timers 队列、IO 事件队列、immediate 队列和 close 事件队列是四个主要阶段)，在执行每个阶段中的回调函数之前，Node 会检查 nextTick 队列是否为空。如果不为空，Node 将会执行 nextTick 队列中所有的回调函数，**直到队列为空**。
+
+> Node 在 11 版本中对事件循环内部做了改动，前后两个版本的 Node 在处理事件循环时会有很大的不同。
+> [https://medium.com/@dpjayasekara/new-changes-to-timers-and-microtasks-from-node-v11-0-0-and-above-68d112743eb3](https://medium.com/@dpjayasekara/new-changes-to-timers-and-microtasks-from-node-v11-0-0-and-above-68d112743eb3)
+
+这引入了一个新的问题。在 nextTick 回调函数中向 nextTick 队列中加入事件，会导致 nextTick 队列中的回调用不为空，阻止事件循环去处理下一个阶段。我们可以通过如下代码模仿这种情况：
+
+```js noLineNumber
+const fs = require("fs")
+
+function addNextTickRecurs(count) {
+  let self = this
+  if (self.id === undefined) {
+    self.id = 0
+  }
+
+  if (self.id === count) return
+
+  process.nextTick(() => {
+    console.log(`process.nextTick call ${++self.id}`)
+    addNextTickRecurs.call(self, count)
+  })
+}
+
+addNextTickRecurs(Infinity)
+
+setTimeout(console.log.bind(console, "omg! setTimeout was called"), 10)
+
+setImmediate(console.log.bind(console, "omg! setImmediate also was called"))
+
+fs.readFile(__filename, () => {
+  console.log("omg! file read complete callback was called!")
+})
+
+console.log("started")
+```
+
+输出结果中，只有 nextTick 的回调函数一直被执行，形成了一个死循环；而 setTimeout、setImmediate 和 fs.readFile 的回调函数则没有被执行。
+
+```shell noLineNumber
+started
+process.nextTick call 1
+process.nextTick call 2
+process.nextTick call 3
+process.nextTick call 4
+process.nextTick call 5
+process.nextTick call 6
+process.nextTick call 7
+process.nextTick call 8
+process.nextTick call 9
+process.nextTick call 10
+process.nextTick call 11
+process.nextTick call 12
+```
+
+向`addNextTickRecurs`函数中传入一个有限值，能观察到程序在输出了有限值次数的结果后正常退出，其余队列中的回调也得以被执行。
+
+> 在 Node 0.12 版本之前，可以通过设定`process.maxTickDepth`属性来为 nextTick 回调的递归调用设置一个次数上限，但该属性从 0.12 版本之后被移除。只是在规定上，不推荐递归地使用`nextTick`函数。
+
+</Section>
+
+<Section title="Timer 队列">
+
+通过 setTimeout 或 setInterval 注册的回调函数将被添加到 timer 队列中，这是一个由 libuv 实现的数据结构。事件循环执行到 timer 阶段时，会检查是否有到期的 timer 事件，并执行到期的事件，若有多个到期的事件，则会按照**先来先执行**的规则被执行。
+
+在注册 timer 事件时，可以提供一个 delay 参数，但 Node **不保证** 该回调一定会在参数所指定的时间点执行，timer 事件被执行的时间取决于系统的繁忙程度(Node 在执行 timer 事件之前要先检查该事件是否到期，这一步操作会花费一些时间)，事件循环只保证，提供的回调函数不会在 delay 参数所指定的时间点之前执行。下面我们来验证这点：
+
+```js noLineNumber
+const start = process.hrtime()
+
+setTimeout(() => {
+  const end = process.hrtime(start)
+  const time = end[1] / Math.pow(10, 9)
+  console.log(`timeout callback executed after ${end[0]}s and ${time}ms`)
+}, 1000)
+```
+
+上述程序设置了一个 1 秒后执行的 timer 事件，计算事件循环开始，到执行该回调函数为止，经过了多长时间。执行多次该程序会发现，每次的结果都不尽相同，但没有`timeout callback executed after 1s and 0ms` 这种。
+
+> `process.hrtime`函数用于测量代码运行时长，其返回值是一个长度为 2 的数组，该数组的第一个元素为经过时间的秒数，第二个元素为距离下一秒的纳秒数。我们一般通过将第一次不提供参数的该函数的返回值，作为参数提供给第二次调用的该函数，所得到的返回值即为两次调用的时间差。例如返回值结果为[14,910595000]，则表示距离上一次调用经过了 14 秒又 910595000 纳秒(nanoseconds, 10 的负 9 次方秒)。
+
+```shell noLineNumber
+timeout callback executed after 1s and 0.006058353ms
+timeout callback executed after 1s and 0.004489878ms
+timeout callback executed after 1s and 0.004307132ms
+# ...
+```
+
+由于 timer 事件的这种特点，setTimeout 和 setImmediate 同时使用时，可能会导致不可预测的结果。
+
+</Section>
+
+<Section title="immediate 队列">
+
+尽管 immediate 队列在一定程度的行为上和 timer 队列很相似，但其也有着一些自身才有的特点。不像 timer 队列中的回调即使设置成了 0 秒后执行，也无法保证其何时会被执行，通过 immediate 注册的回调则保证一定会在 IO 阶段后被执行。
+
+```js noLineNumber
+setImmediate(() => {
+  console.log("Hi, this is an immediate")
+})
+```
+
+<Section title="setTimeout 对比 setImmediate">
+
+反观开头的事件循环图，事件循环开始时从 timer 阶段开始执行，之后是 IO 阶段，再是 immediate 阶段。从中，我们**似乎**可以推断出下列代码中两个回调的执行顺序：
+
+```js noLineNumber
+setTimeout(function () {
+  console.log("setTimeout")
+}, 0)
+setImmediate(function () {
+  console.log("setImmediate")
+})
+```
+
+由于 timer 阶段先于 immediate 阶段执行，所以肯定是 setTimeout 先输出。**但并不能保证每次运行都是如此！**多次执行上述代码，会发现有时是 setImmediate 先输出。
+
+导致这一有趣现象的原因是，Node 为了与谷歌浏览器 Chrome 的 timer 事件保持一致，将 0 毫秒重写为了 1 毫秒。即使代码中写的是 0，但在内部也会被改为 1 ms。
+
+[https://github.com/nodejs/help/issues/392#issuecomment-305969168](https://github.com/nodejs/help/issues/392#issuecomment-305969168)
+
+在开始执行事件循环时，Node 通过调用系统指令获取当前时间，取决于当时 CPU 的繁忙程度，读取当前时间这步操作<u>也许会/也许不会</u>超过 1 毫秒。若不到 1ms，则 timer 事件还没有到期，事件循环会继续检查后面几个阶段，直到 immediate 阶段，执行了 setImmediate 的回调；若超过 1ms，事件循环检查到 setTimeout 的回调已经过期，则会先执行 timer 事件。
+
+然而，在下面的情况中，immediate 回调**保证**会在 timer 回调之前执行。
+
+```js noLineNumber
+const fs = require("fs")
+
+fs.readFile(__filename, () => {
+  setTimeout(() => {
+    console.log("timeout")
+  }, 0)
+  setImmediate(() => {
+    console.log("immediate")
+  })
+})
+```
+
+将 setTimeout 和 setImmediate 放到了 IO 回调之中。
+
+我们来分析一下上述代码的执行流程：
+
+- 一开始，异步读取文件，读完后将会执行提供的回调函数。
+- 事件循环开始
+- 一旦文件读取完毕，回调函数将会被添加到 IO 阶段的队列中。
+- 由于没有其他需要执行的事件，Node 正在等待 IO 事件。之后回调被添加到 IO 队列，事件循环开始执行该回调函数。
+- 在执行该回调的过程中，一个 timer 事件被添加到 timer 队列，一个 immediate 事件被添加到 immediate 队列。
+- 目前事件循环在 IO 阶段，执行完该 IO 回调后，下一个阶段是 immediate 阶段，所以 immediate 事件将会被先执行。
+- 事件循环在下一圈中，看到了 timer 队列中的回调，继而执行。
+
+</Section>
+
+</Section>
+
+<Section title="结论">
+
+我们来看一个例子
+
+```js noLineNumber
+setImmediate(() => console.log("this is set immediate 1"))
+setImmediate(() => console.log("this is set immediate 2"))
+setImmediate(() => console.log("this is set immediate 3"))
+
+setTimeout(() => console.log("this is set timeout 1"), 0)
+setTimeout(() => {
+  console.log("this is set timeout 2")
+  process.nextTick(() =>
+    console.log("this is process.nextTick added inside setTimeout")
+  )
+}, 0)
+setTimeout(() => console.log("this is set timeout 3"), 0)
+setTimeout(() => console.log("this is set timeout 4"), 0)
+setTimeout(() => console.log("this is set timeout 5"), 0)
+
+process.nextTick(() => console.log("this is process.nextTick 1"))
+process.nextTick(() => {
+  process.nextTick(
+    console.log.bind(console, "this is the inner next tick inside next tick")
+  )
+})
+process.nextTick(() => console.log("this is process.nextTick 2"))
+process.nextTick(() => console.log("this is process.nextTick 3"))
+process.nextTick(() => console.log("this is process.nextTick 4"))
+```
+
+上述代码执行完毕后，总共有如下种类和数量的回调被添加到了各自的队列
+
+- 3 个 `immediate`
+- 5 个 `timer`
+- 5 个 `nextTick`
+
+我们来理一下顺序：
+
+1. 事件循环开始，注意到 nextTick 队列中的回调，开始执行。在执行第 2 个 nextTick 回调时，一个新的 nextTick 回调又被添加到了队列中的最后，该新添加的回调将会在队列的最后被执行。
+2. 事件循环到了 timer 阶段，第二个回调中，添加了一个 nextTick 回调
+3. 所有的 timer 回调均被执行过后，事件循环注意到了 `2` 中被添加的 nextTick 回调，执行该 nextTick 回调。
+4. 没有 IO 事件需要执行，事件循环继续移动到 immediate 阶段，执行 immediate 回调。
+
+输出结果如下：
+
+```shell noLineNumber
+this is process.nextTick 1
+this is process.nextTick 2
+this is process.nextTick 3
+this is process.nextTick 4
+this is the inner next tick inside next tick
+this is set timeout 1
+this is set timeout 2
+this is set timeout 3
+this is set timeout 4
+this is set timeout 5
+this is process.nextTick added inside setTimeout
+this is set immediate 1
+this is set immediate 2
+this is set immediate 3
+```
+
+</Section>

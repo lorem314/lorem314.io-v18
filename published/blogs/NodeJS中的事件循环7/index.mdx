@@ -1,0 +1,243 @@
+---
+title: "NodeJS 中的事件循环 第 7 部分 — JS 事件循环 vs NodeJS 事件循环"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-11-22
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote variant="original-link">
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/javascript-event-loop-vs-node-js-event-loop-aea2b1b85f5c"
+>
+  JavaScript Event Loop vs Node JS Event Loop
+</a>
+
+</blockquote>
+
+对于 Node 初学者来说，事件循环是一个需要花费一些时间去理解的概念。在浏览器中，JavaScript 由另外一种事件循环 —— JS 事件循环 —— 来执行，这继而引出几个问题：
+
+1. 浏览器和 Node 中的事件循环一样吗，还是完全不同
+2. 若是有不同的话，有哪些不同
+3. 若是一样的话，为什么会有两种不同的叫法
+
+长话短说，**它们在某种程序上类似**，同样在实施方面也有不同之处。在该小节中，我们将对其着重讨论，消除歧义。
+
+<Section title="具体什么是事件循环">
+
+事件循环在编程中是一个通用的模式，指代一个遍历已完成的事件的结果的循环，并执行它们。再次层面上，JS 事件循环和 Node 事件循环没有差别。
+当 JS 程序运行时，会触发多种事件，这些事件会使对应的处理函数被放入队列，事件循环不断地检查被放入队列的回调，并相应地处理他们。
+
+</Section>
+
+<Section title="HTML5 规范中对事件循环的描述">
+
+<a target="_blank" href="https://html.spec.whatwg.org/">
+  HTML5 规范
+</a>
+描述了一个规范集合，第三方可遵循这些规范来开发浏览器、JS运行环境或是其他相关的库。同样还描述了实现事件循环模型的指南，以及其他可能与事件循环有关的
+JS 特性，如 timer。
+
+大多数浏览器和 JS 运行环境都会遵循这些规范，以便在万维网中获得更好的兼容性。然而，有些情况下，也会稍微避开这些规范，从而导致不同的结果。
+
+后面的文章中，我们会讨论一些不同，尤其是 Node 和浏览器之间的。由于浏览器中的实现可能随事件而改变，我们不进行过深入的研究。
+
+</Section>
+
+<Section title="客户端 VS 服务端 JavaScript">
+
+多年以来，JS 都被限制在客户端，如在浏览器上运行的可交互页面程序。有了 Node 之后，JS 也可以被用于开发服务端应用程序了。尽管两者所使用的语言都是 JS，但客户端和服务端有着不同的要求。
+
+浏览器是一个沙盒环境，由于被限制，浏览器中的 JS 无法执行一些只有服务端 JS 才能实现的功能，如文件操作和网络操作。这需要服务端 JS 中的事件循环能够满足这些额外的要求。
+
+浏览器和 Node 都实施了 JS 的异步事件模式，然而，在浏览器中，事件指用户和页面的交互，如鼠标点击，鼠标移动，键盘按下；在 Node 中，事件指异步服务端操作，如文件操作，网络 IO 等。由于这些不同，Chrome 和 Node 在事件循环的实现上有着不同，尽管它们都使用 V8 这个 JS 引擎来执行 JS 代码。
+
+由于事件循环只是一个编程模式，V8 允许使从外部引入事件循环的实现。有了这种灵活性，Chrome 浏览器使用 libevent 实现事件循环，Node 使用 libuv 实现事件循环。因此，Chrome 的事件循环和 Node 的事件循环基于不同的代码库，但也都有着相同的事件循环这一概念。
+
+</Section>
+
+<Section title="浏览器 vs Node 不同">
+
+<Section title="微任务和宏任务">
+
+> 什么是微任务和宏任务？简单地说，宏任务和微任务是两种类型的异步任务。然而，微任务有着更高的执行优先级，promise 回调是微任务，setTimeout 回调是宏任务。
+
+其中一个值得注意的是，浏览器和 Node 对待微任务和宏任务是不同的。11 版本之前的 Node 在这方面与浏览器的行为保持一致，但在 11 版本之后，如同之前提到过的，有着很大的不同。
+
+现在来看几个例子：
+
+```js
+Promise.resolve().then(() => console.log("promise1 resolved"))
+Promise.resolve().then(() => console.log("promise2 resolved"))
+setTimeout(() => {
+  console.log("set timeout3")
+  Promise.resolve().then(() => console.log("inner promise3 resolved"))
+}, 0)
+setTimeout(() => console.log("set timeout1"), 0)
+setTimeout(() => console.log("set timeout2"), 0)
+Promise.resolve().then(() => console.log("promise4 resolved"))
+Promise.resolve().then(() => {
+  console.log("promise5 resolved")
+  Promise.resolve().then(() => console.log("inner promise6 resolved"))
+})
+Promise.resolve().then(() => console.log("promise7 resolved"))
+```
+
+> 也可以使用 `queueMicrotask` 函数来注册微任务，浏览器和 Node 环境中都可以使用该函数。
+
+下面是分别在 Node10.19.0，Node11.0.0，Chrome84，Firefox78 和 Safari13.0.5 中执行上述代码的输出结果。
+
+![输出结果](/blogs/NodeJS中的事件循环7/output-7-1.webp)
+
+如图所示，Node11 和其他浏览器的输出结果都相同，只有 Node10 下的结果不同。
+
+根据 HTML5 规范中对事件循环的[规定](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model)，事件循环需要先将微任务队列中的任务全部执行完毕，再去执行宏任务。上述例子中，set timeout3 执行后，又添加了一个 promise 回调，根据规定，在处理其他 timer 中的回调之前，应确保微队列为空。因此，需要马上执行新加入的 promise 回调，输出 inner promise3 resolved。之后，微任务队列为空，事件循环继续执行 timer 回调。
+
+但在 Node11 之前，微任务队列只在两个阶段中间检查和执行。因此，inner promise3 在 set timeout3，1，2 输出之前都不会有机会执行，才会最后输出。
+
+</Section>
+
+<Section title="嵌套 timer 的行为">
+
+timer 回调的行为在 Node 和浏览器中各不相同，在其他 JS 环境中也是如此。尤其是当 delay 参数为 0 秒时的 timer 回调，和嵌套的 timer。
+
+为了更好的理解，在之前的 5 中不同 JS 环境中执行下面的代码。代码中有一个 8 层的 timer 嵌套，我们计算每层嵌套的输出时间。
+
+```js
+const startHrTime = () => {
+  if (typeof window !== "undefined") return performance.now()
+  return process.hrtime()
+}
+
+const getHrTimeDiff = (start) => {
+  if (typeof window !== "undefined") return performance.now() - start
+  const [ts, tns] = process.hrtime(start)
+  return ts * 1e3 + tns / 1e6
+}
+
+console.log("start")
+const start1 = startHrTime()
+const outerTimer = setTimeout(() => {
+  const start2 = startHrTime()
+  console.log(`timer1: ${getHrTimeDiff(start1)}`)
+  setTimeout(() => {
+    const start3 = startHrTime()
+    console.log(`timer2: ${getHrTimeDiff(start2)}`)
+    setTimeout(() => {
+      const start4 = startHrTime()
+      console.log(`timer3: ${getHrTimeDiff(start3)}`)
+      setTimeout(() => {
+        const start5 = startHrTime()
+        console.log(`timer4: ${getHrTimeDiff(start4)}`)
+        setTimeout(() => {
+          const start6 = startHrTime()
+          console.log(`timer5: ${getHrTimeDiff(start5)}`)
+          setTimeout(() => {
+            const start7 = startHrTime()
+            console.log(`timer6: ${getHrTimeDiff(start6)}`)
+            setTimeout(() => {
+              const start8 = startHrTime()
+              console.log(`timer7: ${getHrTimeDiff(start7)}`)
+              setTimeout(() => {
+                console.log(`timer8: ${getHrTimeDiff(start8)}`)
+              })
+            })
+          })
+        })
+      })
+    })
+  })
+})
+```
+
+以下是结果：
+
+![输出结果](/blogs/NodeJS中的事件循环7/output-7-2.webp)
+
+> **注意！**为了准确地计算执行时间，在浏览器中我们用 performance.now，在 Node 中我们用 process.hrtime 分别获取时间。为了便于展示和分析，图中的结果都保留了两位小数。另外，多次执行上述代码的结果肯定会有所不同，因为取决于 CPU 的繁忙程度，setTimeout 回调的执行时间肯定或多或少会大于参数 delay 指定的时间。
+
+一些重要结论：
+
+- 即使设置 delay 参数为 0 毫秒，在 NodeJS 中，它们的执行时间都在 1 毫秒之后。
+- Chrome 浏览器的前 4 个嵌套的 timer 都在 1 毫秒多，但后 4 个都在 4 毫秒多。
+- 不像 Chrome，Firefox 的前四个都在 1 毫秒之内，但后四个也在 4 毫秒多。
+- Safari 中前 5 个回调在 1-2 毫秒，但从第六个开始突然变为 4-5 毫秒。
+
+所以，浏览器中突然增加到 4 毫秒左右是怎么一回事呢？
+
+这在 HTML 标准中有[描述](https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timers)：
+
+> Timer 可以嵌套调用，然而在 5 个嵌套之后，间隔被强制为 4 毫秒。
+
+根据这个规则，再加上在 Chrome 和 FireFox 浏览器中的输出结果，这种强制上限的行为应该在第 5 个嵌套的 timer 回调时开始起作用。但原因仍未表明，Safari 浏览器似乎并没有严格遵循这个规定，因为它从第 6 个开始才起作用。
+
+> **黑客时间！**在 FireFox 浏览器中，这 4 毫秒的时间可以在`about:config`中通过`dom.min_timeout_value`变量来修改。
+
+现在把浏览器放一边，再来研究一下 Node 中的结果。根据上图，Node 并没有从某级嵌套开始强制限制秒数，但 Node 和 Chrome 浏览器都有一个另外的有趣现象。
+
+</Section>
+
+<Section title="Node 和 Chrome 中 timer 的最小 delay">
+
+Node 和 Chrome 对于 0 毫秒的 timer，都至少放到了 1 毫秒之后才执行，即使对于没有嵌套的 timer 也是如此。但不像 Chrome，Node 中无论是第几层嵌套，延迟都是 1 毫秒多。
+
+以下是 Node 中 Timeout 类的定义，可以看出 1 毫秒是强制定义的。
+
+```js
+function Timeout(callback, after, args, isRepeat, isRefed) {
+  after *= 1 // Coalesce to number or NaN
+  if (!(after >= 1 && after <= TIMEOUT_MAX)) {
+    if (after > TIMEOUT_MAX) {
+      process.emitWarning(
+        `${after} does not fit into` +
+          " a 32-bit signed integer." +
+          "\nTimeout duration was set to 1.",
+        "TimeoutOverflowWarning"
+      )
+    }
+    after = 1 // Schedule on next tick, follows browser behavior
+  }
+
+  // ....redacted
+}
+```
+
+Chrome 在 DOMTimer 类中也有类似的行为，
+
+```cpp noLineNumber
+DOMTimer::DOMTimer(ExecutionContext* context, PassOwnPtrWillBeRawPtr<ScheduledAction> action, int interval, bool singleShot, int timeoutID)
+    : SuspendableTimer(context)
+    , m_timeoutID(timeoutID)
+    , m_nestingLevel(context->timers()->timerNestingLevel() + 1)
+    , m_action(action)
+{
+    // ... redacted ...
+    double intervalMilliseconds = std::max(oneMillisecond, interval * oneMillisecond);
+    if (intervalMilliseconds < minimumInterval && m_nestingLevel >= maxTimerNestingLevel)
+        intervalMilliseconds = minimumInterval;
+    if (singleShot)
+        startOneShot(intervalMilliseconds, FROM_HERE);
+    else
+        startRepeating(intervalMilliseconds, FROM_HERE);
+}
+```
+
+正如所见，不同的 JS 环境有着不同的奇怪的方式来管理嵌套 timer 和覆盖 timer 回调的 0 毫秒。在开发 JS 应用和代码库时，这一点一定要牢记于心，为了兼容性，不过分格依赖于特定环境的行为。
+
+</Section>
+
+<Section title="process.nextTick 和 setImmediate">
+
+浏览器和 Node 的另一个不同之处是，`process.nextTick` 和 `setImmediate`。
+
+目前 `process.nextTick` 只存在于 Node 中，浏览器中没有与其对应的实现。nextTick 回调并不属于 libuv 实现的事件循环，其是由于 Node 在事件循环期间跨 C++和 JS 边界而执行的。所以在某种程度上，也可以说和事件循环有一些联系。
+
+setImmediate 也只存在于 Node 中。根据[MDN](https://developer.mozilla.org/en-US/docs/Web/API/Window/setImmediate)和[caniuse.com](https://caniuse.com/#search=setImmediate)中的描述，IE10、11 和早期版本的 edge 浏览器中都支持该特性。目前还不清楚其他浏览器是否会在某天加入对其的支持。至少在本文发布的时间点上，还没有被主流浏览器广泛支持。
+
+</Section>
+
+</Section>

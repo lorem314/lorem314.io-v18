@@ -1,0 +1,192 @@
+---
+title: "NodeJS 中的事件循环 第 4 部分 — 处理 IO"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-11-06
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote variant="original-link">
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/handling-io-nodejs-event-loop-part-4-418062f917d1"
+>
+  Handling IO — NodeJS Event Loop Part 4
+</a>
+
+</blockquote>
+
+<Section title="异步 IO 阻塞太主流了">
+
+讨论 Node 时，我们会不可避免地多次提到异步，也正如我们之前所讨论过的，IO 从来就没有同步过。
+
+在所有操作系统实现中，都为异步 IO 提供了事件通知接口（如 Linux 中地 epoll、macOS 中的 kqueue、Solaris 中的 event ports 和 Windows 中的 IOCP）。NodeJS 封装了这些平台级别的事件通知系统功能，提供了非阻塞、异步的 IO 访问。
+
+NodeJS 由多个高实用程序组成，并以此来提供高性能的 JS 执行环境。这些程序包括：
+
+- Chrome v8 引擎，高性能执行 JS 代码
+- Libuv，异步 IO 事件循环
+- c-ares，DNS 操作
+- 其他，如 http-parser，crypto 和 zlib
+
+![NodeJS架构](/blogs/NodeJS中的事件循环1/nodejs-architecture.jpg)
+
+在本节中，我们主要讨论 Libuv 如何给 Node 提供异步 IO。再来看一次事件循环图：
+
+![NodeJS事件循环](/blogs/NodeJS中的事件循环1/nodejs-event-loop.jpg)
+
+重温一下之前提到过的事件循环中的阶段：
+
+- 事件循环从 timer 阶段开始，检查过期的 timer 回调并执行
+- 之后，执行 IO 回调。若有还未被添加到 IO 队列的回调，事件循环会在这里挂起，等待并执行
+- 之后，执行 immediate 回调
+- 最终，执行 IO close 回调
+- 两个阶段中间，libuv 需要将上个阶段的结果传达给更高层的 Node 架构，即 JS。此时会执行 process.nextTick 回调和其他微任务回调。
+
+现在我们来讲解 NodeJS 在事件循环如何处理 IO：
+
+> **什么是 IO **  
+> 通常来讲，涉及到任何外部设备(CPU 除外)的工作都成为 IO。最常见的 IO 类型是文件 IO 和 TCP、UDP 网络操作。
+
+</Section>
+
+<Section title="libuv 和 NodeJS IO">
+
+JS 本身无法执行异步 IO 操作。在 Node 的开发过程中，libuv 起初只为 Node 提供异步 IO，现在，libuv 成为一个独立的库，并可以被其他程序单独所使用。libuv 将内部复杂的 IO 抽象化，并提供了统一的接口，使 Node 成为跨平台的异步 IO 库。
+
+> 注意！  
+> 推荐阅读完之前的章节再继续阅读。为了方便，可能会省略一些细节，主要注重于讲解 IO。  
+> 接下来引用一些来自 libuv 库中的代码，且是侧重 unix 系统的代码，windows 的可能会有些不同，但差别不会太大。  
+> 稍微需要一些阅读 C 代码的能力，但不需要太高。
+
+在之前看到的 NodeJS 架构图中，libuv 处于底层的位置。现在我们再来看一下 NodeJS 上层和 libuv 中的事件循环之间的联系。
+
+![事件循环和JavaScript](/blogs/NodeJS中的事件循环4/event-loop-and-javascript.jpg)
+
+在之前的那张 NodeJS 事件循环流程图中，有 4 个主要阶段。但在 libuv 中，有 7 个主要阶段。分别是：
+
+1. timers —— 通过 setTimeout 和 setImmediate 注册的回调函数
+2. 挂起的 IO 回调 —— 等待执行的，已完成或抛出错误的 IO 回调
+3. idle handler —— 执行一些 libuv 内部操作
+4. prepare handler —— 为执行 IO 做准备的一个阶段
+5. IO polling —— 等待 IO 完成（非强制性的）
+6. check handler —— IO 后的阶段，一般 setImmediate 的回调会在此时执行
+7. close handler —— 已结束的 IO 操作的回调，如关闭的 socket 连接
+
+这时你可能会比较疑惑…
+
+1. 什么是 check handler？之前的图中没有这个阶段
+2. 什么是 IO polling？为何要在执行完 IO 回调后阻塞 IO 呢，Node 不是非阻塞的吗？
+
+下面来回答以上问题
+
+</Section>
+
+<Section title="Check Handler">
+
+在 Node 运行最初，libuv 会将所有的 setImmediate 回调标记为 check handler。即所有通过 setImmediate 添加的回调函数都会被送到 Libuv 中的 check handler 队列，该队列会在 IO 操作之后被执行。
+
+</Section>
+
+<Section title="IO polling">
+
+在 Node 事件循环流程图中，IO 阶段其实是由 IO 回调队列和 IO polling 两部分组成，polling 发生在 IO 回调完成或抛出错误之后。
+
+但最重要的是，IO polling 在某些情况下，是可发生也是可不发生的。为了能彻底弄明白，我们看一下 libuv 中的源码：
+
+```cpp noLineNumber
+r = uv__loop_alive(loop);
+  if (!r)
+    uv__update_time(loop);
+
+while (r != 0 && loop->stop_flag == 0) {
+    uv__update_time(loop);
+    uv__run_timers(loop);
+    ran_pending = uv__run_pending(loop);
+    uv__run_idle(loop);
+    uv__run_prepare(loop);
+
+    timeout = 0;
+    if ((mode == UV_RUN_ONCE && !ran_pending) || mode == UV_RUN_DEFAULT)
+      timeout = uv_backend_timeout(loop);
+
+    uv__io_poll(loop, timeout);
+    uv__run_check(loop);
+    uv__run_closing_handles(loop);
+
+    if (mode == UV_RUN_ONCE) {
+      uv__update_time(loop);
+      uv__run_timers(loop);
+    }
+
+    r = uv__loop_alive(loop);
+    if (mode == UV_RUN_ONCE || mode == UV_RUN_NOWAIT)
+      break;
+}
+```
+
+如上是`core.c`文件中`uv_run`函数中的部分代码，这里实现了事件循环的核心逻辑。
+
+1. `uv__loop_alive` —— 检查是否有未完成的回调，或未完成的操作
+2. `uv__update_time` —— 获取系统时间，更新循环时间
+3. `uv__run_timers` —— 执行到期的 timer
+4. `uv__run_pending` —— 执行已完成的，或出错的 IO 回调
+5. `uv__io_poll` —— IO polling
+6. `uv__run_check` —— 执行所有的 immediate 回调
+7. `uv__run_closing_handles` —— 执行所有的 close 回调
+
+首先，通过`uv__loop_alive`函数，检查事件循环检查循环是否是激活状态，该函数很简洁。
+
+```cpp noLineNumber
+static int uv__loop_alive(const uv_loop_t* loop) {
+  return uv__has_active_handles(loop) ||
+         uv__has_active_reqs(loop) ||
+         loop->closing_handles != NULL;
+}
+```
+
+该函数返回一个 bool 类型的值，以下情况该函数会返回`true`。
+
+1. 有待执行的 handler
+2. 有未完成的请求
+3. 有待执行的 close handler
+
+只要该函数返回 true，事件循环将一直保持执行。
+
+在处理完所有已到期的 timer 事件后，`uv__run_pending`函数将会被执行，该函数将会遍历所有由 libuv 存储在`pending_queue`中的已完成 IO 操作。如果`pending_queue`为空，该函数返回 0。否则，`pending_queue`中的所有回调将被执行，函数返回 1。
+
+```cpp noLineNumber
+static int uv__run_pending(uv_loop_t* loop) {
+  QUEUE* q;
+  QUEUE pq;
+  uv__io_t* w;
+
+  if (QUEUE_EMPTY(&loop->pending_queue))
+    return 0;
+
+  QUEUE_MOVE(&loop->pending_queue, &pq);
+
+  while (!QUEUE_EMPTY(&pq)) {
+    q = QUEUE_HEAD(&pq);
+    QUEUE_REMOVE(q);
+    QUEUE_INIT(q);
+    w = QUEUE_DATA(q, uv__io_t, pending_queue);
+    w->cb(loop, w, POLLOUT);
+  }
+
+  return 1;
+}
+```
+
+再来看以下 libuvb 中 `uv__io_poll` 函数处理 IO polling 时的阶段。
+
+`uv__io_poll` 函数的第二参数 timeout，由 `uv_backend_timeout` 函数返回。`uv__io_poll` 函数根据该值来决定阻塞 IO 的时长，如果值为 0，IO polling 将被跳过，事件循环将移动至下一个(immediate)阶段。决定 timeout 值的过程非常有趣，根据以上的代码，我们可以推导出：
+
+- 如果事件循环以`UV_RUN_DEFAULT`模式运行，timeout 的值由`uv_backend_timeout`方法计算。
+- 如果事件循环以`UV_RUN_ONCE`，且`uv_run_pending`返回 0，即`pending_queue`为空，则 timeout 的值也由`uv_backend_timeout`方法计算。
+- 否则，timeout 的值为 0。
+
+</Section>

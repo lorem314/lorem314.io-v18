@@ -1,0 +1,268 @@
+---
+title: "NodeJS 中的事件循环 第 5 部分 — 事件循环最佳实践"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-11-11
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote variant="original-link">
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/event-loop-best-practices-nodejs-event-loop-part-5-e29b2b50bfe2"
+>
+  Event Loop Best Practices — NodeJS Event Loop Part 5
+</a>
+
+</blockquote>
+
+本节中我们讨论几个实际问题，帮助你在编写 Node 应用程序时获得最佳性能。
+
+很多人在编写前几个 Node 应用程序时都不是很理想，主要原因在于他们没能完全理解如事件循环、错误处理和异步等概念。有了前几章的铺垫，相信接下来所要讲解的例子对你来说也能很轻松地掌握。
+
+<Section title="避免在反复执行的代码中使用同步 IO">
+
+永远不要在循环或会执行多次的函数中使用 `fs.readFileSync`，`fs.renameSync` 等同步函数，这会降低程序的性能，因为每次同步函数执行都会阻塞事件循环，直到同步函数结束。最好的做法是在程序启动时使用同步代码读取文件，在用户使用程序的过程中不要执行任何同步函数。
+
+</Section>
+
+<Section title="函数应该纯异步或纯同步">
+
+应用程序由许多小的函数组成，在 Node 中，函数可分为两种：
+
+1. 同步函数 —— 一般情况下在函数体中用关键词 return 来返回值，或使用 CPS（Continuation-passing style，通讯传递样式）来返回值或执行操作。如使用数组中的 map filter 或 reduce 方法
+2. 异步函数 —— 用回调函数或 promise 来获取返回值。如 fs.readFile 或 dns.resolve 等方法。
+
+重要的是，编写函数时一定要
+
+- 完全**同步**，函数中的所有操作都是**同步**的
+- 完全**异步**，函数中的所有操作都是**异步**的
+
+如果一个函数中的操作既有同步又有异步，就可能导致一些<u>难以预料的结果</u>。我们来看一个例子：
+
+```js noLineNumber
+const cache = {}
+
+function readFile(fileName, callback) {
+  if (cache[fileName]) {
+    return callback(null, cache[fileName])
+  }
+
+  fs.readFile(fileName, (err, fileContent) => {
+    if (err) return callback(err)
+
+    cache[fileName] = fileContent
+    callback(null, fileContent)
+  })
+}
+```
+
+我们再使用上述函数来实现另一个函数，错误处理在此先不讨论。
+
+```js noLineNumber
+function letsRead() {
+  readFile("myfile.txt", (err, result) => {
+    // error handler redacted
+    console.log("file read complete")
+  })
+
+  console.log("file read initiated")
+}
+```
+
+现在执行两次`letsRead`函数，会得到以下结果：
+
+```shell noLineNumber
+# 第一次
+file read initiated
+file read complete
+# 第二次
+file read complete
+file read initiated
+```
+
+发生了什么？
+
+第一次执行 letsRead 函数时，myfile.txt 没有存储在 cache 中。因此，异步 fs.readFile 函数将执行，来访问文件。这种情况下，该函数 readFile 表现得与异步相同，先输出 `file read initiated`。
+
+第二次执行 letsRead 函数时，myfile.txt 已经缓存在了 cache 中。因此，无需在读取文件，readFile 的回调会马上执行。这种情况下，函数 readFile 表现得与同步相同，先输出 `file read complete` 在输出 `file read initiated`。
+
+随着应用程序变得越来越复杂，这种半异步半同步函数会导致各种问题，且难以调试找到问题的所在。因此，**极力推荐**遵循上述过的，全同步或全异步的函数编写规则。
+
+我们有两种方法来修改该函数：
+
+1. 使 readFile 函数完全同步，即使用 `fs.readFileSync` 函数。
+2. 使 readFile 函数完全异步，即通过执行回调函数
+
+如之前所提到过的，在重复代码中应尽量使用函数的异步版本。因此，我们应该摒弃方法 1，同步调用会导致性能问题，使程序卡顿。那么该如何实现方法 2 呢，很简单，可以使用 process.nextTick。
+
+```js noLineNumber
+const cache = {}
+
+function readFile(fileName, callback) {
+  if (cache[fileName]) {
+    process.nextTick(() => {
+      callback(null, cache[fileName])
+    })
+  }
+
+  fs.readFile(fileName, (err, fileContent) => {
+    if (err) return callback(err)
+
+    cache[fileName] = fileContent
+    callback(null, fileContent)
+  })
+}
+```
+
+process.nextTick 会使回调函数的执行延迟到下一个事件循环阶段之前。现在再来执行两次 letsRead 函数：
+
+```shell noLineNumber
+# 第一次
+file read initiated
+file read complete
+# 第二次
+file read initiated
+file read complete
+```
+
+在此也可以使用 setImmediate 来实现，我个人更推荐 process.nextTick，因为事件循环检查微任务队列更频繁。
+
+</Section>
+
+<Section title="过多的 nextTick">
+
+尽管 process.nextTick 在多种情况下都很有用，但递归地调用会导致事件循环卡住，永远不会执行下一个阶段。
+
+远古版本的 Node(≤0.10)中提供了一个参数 `process.maxTickDepth`，来控制递归调用 nextTick 的上限。但该参数在 0.12 版本之后被移除，相对的引入了 setImmediate。
+
+<Section title="dns.lookup 和 dns.resolve">
+
+如果你仔细研究过 Node 文档中的 dns 模块，当中有两种方法查明主机名对应的 IP 地址。一种是通过 dns.lookup 或使用 dns.resolve4，dns.resolve6。这两种方法看上去 一样，但内部有着很大的区别。
+
+dns.lookup 和 ping 命令类似，调用系统网络函数 getaddrinfo。不幸的是，这个函数不是异步的，因此，为了模仿异步，libuv 将其封装为 uv_getaddrinfo，并在线程池中执行。这可能会影响其他在线程池中运行的任务，并可能对程序产生负面影响。libuv 线程池默认最多可容纳 4 个线程，因此，4 个同时执行的 dns.lookup 可占满整个线程池，并阻塞其他请求(如文件 IO，crypto 函数，或是其他 lookup 查询)。
+
+相反的，dns.resolve 等函数则不同，下面是官方文档中对该函数的描述。
+
+> 这些函数的实现与 dns.lookup 函数有很大不同。它们不适用 getaddrinfo(3)函数，并总是在网络上执行 DNS 查询。该网络通讯是异步的，但并不使用 libuv 的线程池。
+
+Node 通过 c-ares 库来实现 DNS 操作，该库不依赖于 libuv 的线程池，且完全运行在网络上。
+
+dns.resolve 不会占据 libuv 的线程池，因此，最好使用 resolve 代替 lookup，除非要遵循 getaddrinfo 函数期间会访问的**/etc/nsswitch.conf、/etc/hosts 等**配置文件。
+
+但还有一个大问题！
+
+假设我们用 Node 向某个网站发送 HTTP 请求。首先，会将该网站的 url 解析为 ip 地址，然后异步地建立 TCP 链接。所以，发送 HTTP 请求需要两步。
+
+目前，Node 中 http 和 https 两个模块内部都使用 lookup 来将主机名解析为 IP 地址。若是由于 DNS 提供商没能解析 IP，或是高网络延迟，多个 http 请求也能轻易地占满线程池。这两个模块也因此引起了广泛的[关注](https://github.com/request/request/issues/2491)，在该文章撰写的时间点(2017-12-29)，为坚持操作系统原生行为，没有得到改变。许多 npm 包如 request 也是用了 http 和 https 模块，因此也受了该问题的影响。
+
+如果你注意到了应用程序在文件 IO、crypto 或其他关系到线程池的操作上的性能急剧下降，以下几件事可以暂时缓解性能开销：
+
+- 通过设置 `UV_THREADPOOL_SIZE` 环境变量为 128，来增加线程池可容纳线程的个数。
+- 用 `dns.resolve` 函数来查询 IP 地址，并直接使用 IP 地址。下面的例子同 request 模块类似
+
+下列代码例子没有经过优化，仅作为例子使用，不建议在生产环境中使用。同时，下列代码只能运行在 Nodo8 之后的版本，因为 lookup 无法在早期 tls.connect 函数中使用。
+
+```js noLineNumber
+const dns = require("dns")
+const http = require("http")
+const https = require("https")
+const tls = require("tls")
+const net = require("net")
+const request = require("request")
+
+const httpAgent = new http.Agent()
+const httpsAgent = new https.Agent()
+
+const createConnection = ({ isHttps = false } = {}) => {
+  const connect = isHttps ? tls.connect : net.connect
+  return function (args, cb) {
+    return connect(
+      {
+        port: args.port,
+        host: args.host,
+        lookup: function (hostname, args, cb) {
+          dns.resolve(hostname, function (err, ips) {
+            if (err) {
+              return cb(err)
+            }
+
+            return cb(null, ips[0], 4)
+          })
+        },
+      },
+      cb
+    )
+  }
+}
+
+httpAgent.createConnection = createConnection()
+httpsAgent.createConnection = createConnection({ isHttps: true })
+
+function getRequest(reqUrl) {
+  request(
+    {
+      method: "get",
+      url: reqUrl,
+      agent: httpsAgent,
+    },
+    (err, res) => {
+      if (err) throw err
+      console.log(res.body)
+    }
+  )
+}
+
+getRequest("https://example.com")
+```
+
+</Section>
+
+</Section>
+
+<Section title="有关线程池的关注点">
+
+如前面提到过的，libuv 线程池不知用于文件 IO，运用不当可能会成为应用程序的瓶颈。如果你察觉到应用程序在一些会进入 libuv 线程池中的操作的执行速度变慢，可适当调 `UV_THREADPOOL_SIZE` 的值。
+
+<Section title="监督事件循环">
+
+监控事件循环的延迟对于防止中断至关重要。这也可以用来生成警报、执行强制重启和扩展服务。
+
+检测事件循环延迟的最简单的方法，是计算回调函数的执行时间。简单地说，我们设置一个回调在 500 毫秒后执行，若是到 550 毫秒才执行，则可以推断事件循环有了约 50 毫秒的延迟。这 50 毫秒应在其他阶段执行回调中被考虑进去。我们使用 loopbench 模块来检测事件循环：
+
+```shell noLineNumber
+npm install loopbench
+```
+
+```js noLineNumber
+const LoopBench = require("loopbench")
+const loopBench = LoopBench()
+
+console.log(`loop delay: ${loopBench.delay}`)
+console.log(`loop delay limit: ${loopBench.limit}`)
+console.log(`is loop overloaded: ${loopBench.overlimit}`)
+```
+
+一个有趣的用例是，您可以公开一个暴露上述值的健康检查端点，以便您可以将您的应用程序与外部警报/监控工具集成。
+
+如上 API 的返回结果可能如下：
+
+```json noLineNumber
+{
+  "message": "application is running",
+  "data": {
+    "loop_delay": "1.2913 ms",
+    "loop_delay_limit": "42 ms",
+    "is_loop_overloaded": false
+  }
+}
+```
+
+我们可以在健康检查中返回 503 服务不可用，以防止更进一步的过载。
+
+</Section>
+
+</Section>

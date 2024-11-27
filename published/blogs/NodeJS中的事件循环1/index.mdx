@@ -1,0 +1,200 @@
+---
+title: "NodeJS 中的事件循环 第 1 部分 — 事件循环及其背景"
+tags:
+  - "NodeJS"
+  - "事件循环"
+  - "JavaScript"
+date: 2022-10-15
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote>
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/event-loop-and-the-big-picture-nodejs-event-loop-part-1-1cb67a182810"
+>
+  Event Loop and the Big Picture — NodeJS Event Loop Part 1
+</a>
+
+</blockquote>
+
+<Section title="反应器模式">
+
+NodeJS 在处理输入输出(IO)时的不同，使其在众多编程语言中脱颖而出。在谈论 NodeJS 的优点时，我们也经常能听到类似**非阻塞、基于 Google V8 JS 引擎的事件驱动语言平台**等特点描述。那到底什么是**非阻塞**和**事件驱动**呢？回答这些问题的关键都隐藏在 NodeJS 的核心部分——事件循环。在本系列文章中，我们将逐步探索什么是事件循环，其如何工作，以及其如何对应用程序产生影响等问题的答案。在本文中，我们主要关注 NodeJS 如何工作、其如何访问 IO 以及其为何能运行在各种不同的平台上。
+
+<blockquote>
+
+反应器模式 (Reactor Pattern)，是一种为处理服务请求并发提交到一个或多个服务处理程序的事件设计模式。当请求抵达后，服务处理程序使用解多路分配策略，然后同步地派发这些请求至相关的请求处理程序。
+
+</blockquote>
+
+NodeJS 使用事件分发器和事件队列来实现事件驱动模型。所有的 IO 请求最终都会触发成功、失败或是其它形式的回调，该回调被我们称为事件。事件按照以下逻辑被处理：
+
+1. 事件分发器接收到 IO 请求，并将该请求发送至合适的硬件。
+2. 一旦 IO 请求被执行（如读取文件内容），事件分发器会将回调函数添加到一个队列中，等待被执行。这些回调被称为事件，该队列被称为事件队列。
+3. 当事件队列中的事件将按照添加进去的顺序依次被执行，直到队列为空。
+4. 事件队列中没有事件且事件分发器中也没有等待结果的请求，程序结束。否则，重复步骤 1。
+
+实现上述整体机制的程序称为**事件循环**。
+
+![NodeJS事件循环机制一览](/blogs/NodeJS中的事件循环1/nodejs-event-loop-overview.jpg)
+
+事件循环是一个单线程、半无限循环。之所以被称为半无限循环，是因为该循环在没有任务需要完成时会自动跳出。从开发者的角度来说，程序也会在此退出。
+
+<blockquote variant="warning">
+
+不要将事件循环和 NodeJS 中的 Event Emitter 搞混。Event Emitter 是另一个完全不同的概念。
+
+</blockquote>
+
+上图描述了 NodeJS 的工作流程以及被称为反应器模式的主要设计模式。想要在不同的系统中达到统一的设计实现起来是很困难的。有多困难呢？
+
+<blockquote>
+
+在所有的操作系统中，所有类型的 IO 事件并**不只由**事件分发器一个组件来处理。
+
+事件队列不是一个单独的队列，能让所有类型的事件都在一个队列中进出。I/O 事件也并不是唯一排队的事件类型。
+
+</blockquote>
+
+让我们继续深入。
+
+</Section>
+
+<Section title="事件分发器">
+
+事件分发器指的不是硬件，而是存在于反应器模式中的一种抽象概念。在现实世界中，不同操作系统中都以不同的方式实现了事件分发器逻辑，如 Linux 中的 **epoll**，BSD (macOS) 中的 **kqueue**，Solaris 中的 **event ports** 和 Windows 中的 **IOCP (Input Output Completion Port)** 等。NodeJS 使用这些实现提供的低级非阻塞、异步硬件 I/O 功能来处理事件。
+
+<Section title="文件IO的复杂性">
+
+事实上，并不是所有类型的 IO 都能用这些实现来处理，即便是在同一个操作系统中，实现支持不同类型的 IO 也都存在一定的困难。通常，网络 IO 请求能通过操作系统中已经实现好了的事件分发器逻辑来处理，但文件 IO 的情况则会更加复杂一些。在某些系统中，如 Linux，不支持异步地访问文件系统；在 macOS 中，通过 kqueue 访问文件系统是有限制的。在如此复杂的情况下实现统一支持异步几乎是不可能的。
+
+</Section>
+
+<Section title="域名系统的复杂性">
+
+相似于文件 IO，某些由 Node API 提供的 DNS 功能也有一定程度的复杂性。由于 NodeJS DNS 功能中的 `dns.lookup` 访问系统配置文件如 `nsswitch.conf`, `resolv.conf` 和 `/etc/hosts` 等，从而引入了上述提到的文件 IO 的复杂。
+
+</Section>
+
+<Section title="解决方案">
+
+因此，线程池的概念被引入，来使上述提到的不可能变为可能。不是所有的 IO 操作都发生在线程池中。对于会阻塞或复杂的 IO 类型，NodeJS 才使用线程池。
+
+<blockquote>
+
+🤔 然而，线程池中也并不是只用于处理 IO，如 NodeJS 中的 crypto 库中的 `crypto.pbkdf2`，异步版本的 `crypto.randomBytes`、`crypto.randomFill` 和 zlib 功能，这些运行在 libuv 线程池，因为这些函数的 CPU 使用率很高，将他们放在线程池中运行防止事件循环被阻塞。
+
+</blockquote>
+
+</Section>
+
+<Section title="统一">
+
+如我们所见，在不同操作系统上实现所有类型 IO 的异步形式非常困难。其中有些 IO 可以借助本就是异步的实现，非异步实现的 IO 将会在线程池中运行以保证异步特性。
+
+<blockquote>
+
+开发者中最常见的误解，是以为 Node 处理了所有种类的 IO 操作。
+
+</blockquote>
+
+为统一所有的过程并实现跨操作系统支持，应该设计一个抽象层来封装所有的跨系统差异，并为 Node 上层导出统一的 API。
+
+因此，libuv 诞生了
+
+![libuv图标](/blogs/NodeJS中的事件循环1/libuv-logo.jpg)
+
+Libuv 的官方文档如是说:
+
+<blockquote>
+
+Libuv 是跨平台，为 NodeJS 而设计，主要实现由事件驱动的异步 IO 操作模型。
+
+该库所提供的不只是一个简单的抽象，handle 和 stream 为 socket 和其他实体提供了高级抽象。同样也提供了跨平台文件 IO 和进程功能，还有其他功能。
+
+</blockquote>
+
+现在我们来看看 libuv 的组成。下图来自 libuv 的官方文档：
+
+![libuv构成一览](/blogs/NodeJS中的事件循环1/libuv-overview.jpg)
+
+目前我们了解了，事件分发器不是一个不可分割的实体，它由多个处理 IO 的程序组合而成，这些程序由 Libuv 抽象，提供给 NodeJS 的上层。Libuv 为 Node 提供的也不止有事件分发器，还包括整个事件循环的全部功能和事件队列机制。
+
+接下来我们说一说**事件队列**。
+
+</Section>
+
+</Section>
+
+<Section title="事件队列">
+
+事件队列是一种数据结构，将其中所有的事件都将会被顺序的执行，直到队列为空。
+
+<blockquote>
+
+NodeJS 中不止有一种队列，所有不同种类的事件都被存放在各自的队列中。
+
+事件循环在处理完一个阶段后，准备移动到下一个阶段之前，会检查两个特殊的队列——通过 process.nextTick 和 Promise 注册的回调事件的队列，我们称之为微队列。
+
+</blockquote>
+
+那么总共有多少种队列呢？主要有 4 种队列由原生的 libuv 的事件循环处理。
+
+- **timer** 队列，通过 setTimeout 和 setInterval 注册的事件
+- **IO** 事件队列
+- **immediate** 队列，通过 setImmediate 注册的事件
+- **close handlers** 队列，任何 close 事件
+
+<blockquote>
+
+尽管上述 4 个阶段的描述中，为了方便，我们使用的都是队列(queue)这个词，其中的一些则是不同的数据结构。如 timer 队列其实是一个 min-heap。
+
+</blockquote>
+
+除去上述的 4 种队列，另外提到的两个微队列由 Node 掌管，他们由 Node 实现，而非 libuv 实现。
+
+- **nextTick**，通过 process.nextTick 注册的事件
+- 其他**微队列**，如已 resolved 的 promise 回调
+
+<Section title="运行机制">
+
+如下图，Node 事件循环开始后先检查是否有过期的 timer。在处理了 close handler 队列之后，若任何队列中都没有事件，也没有挂起的操作，事件循环将会退出。
+
+![NodeJS事件循环](/blogs/NodeJS中的事件循环1/nodejs-event-loop.jpg)
+
+图中被用红色圈起来的微队列，每个阶段结束后，在进入下一个阶段之前，都会检查微队列是否有可执行的事件，若有，则会一直执行直到微队列为空，也包括在该阶段中被添加到微队列中的事件。全部执行完毕之后，才会移动到下一个阶段。
+
+</Section>
+
+<Section title="nextTick和其他微任务">
+
+nextTick 会先于其他微任务执行，如通过已 resolved 的 promise 的 then 注册的回调。只有执行完了所有 nextTick 回调，事件循环才会去处理 promise 的回调。
+
+<blockquote>
+
+nextTick 的优先级高于 promise，只有当该 promise 为原生 NodeJS 提供的 promise 才可以。诸如 q 或 bluebird 等其他库实现的 promise 系统不同于原生 promise。
+
+</blockquote>
+
+这些微队列的引入存在一些潜在问题，从而使事件循环一直检查 nextTick 事件，而不去检查 IO 等其他事件循环中的阶段。
+
+<blockquote>
+
+为避免这种问题的发生，Node 曾引入了 process.maxTickDepth 属性来规定递归地使用 nextTick 注册回调的上限次数，但该属性有在 0.12 版本的 Node 种被移除了。
+
+</blockquote>
+
+在之后的章节中，我们会更进一步地讨论事件循环中的每个阶段。
+
+最后我们再来看一下 libuv 在 NodeJS 架构中的位置。
+
+![NodeJS架构](/blogs/NodeJS中的事件循环1/nodejs-architecture.jpg)
+
+</Section>
+
+</Section>

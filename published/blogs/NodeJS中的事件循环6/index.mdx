@@ -1,0 +1,163 @@
+---
+title: "NodeJS 中的事件循环 第 6 部分 — Node 11 中针对 timer 和微任务的改动"
+tags: ["NodeJS", "事件循环", "JavaScript"]
+date: 2022-11-20
+---
+
+import Section from '@/components/elements/Section'
+
+<blockquote variant="original-link">
+
+翻译自 Medium 付费文章
+
+<a
+  target="_blank"
+  href="https://blog.insiderattack.net/new-changes-to-timers-and-microtasks-from-node-v11-0-0-and-above-68d112743eb3"
+>
+  New Changes to the Timers and Microtasks in Node v11.0.0
+</a>
+
+</blockquote>
+
+11 版本之后的 Node，其内部在调度 setTimeout、setImmediate、process.nextTick 和 Promise 与之前有很大的不同。在本文中，我会通过几个实际的例子来对比版本之间的不同。
+
+<Section title="根本原因">
+
+分别在浏览器和 Node(低于 11 版本) 中执行下列代码，会得到不同的输出结果。
+
+```js
+setTimeout(() => console.log("timeout1"))
+setTimeout(() => {
+  console.log("timeout2")
+  Promise.resolve().then(() => console.log("promise resolve"))
+})
+setTimeout(() => console.log("timeout3"))
+setTimeout(() => console.log("timeout4"))
+```
+
+浏览器中，输出顺序如下：
+
+```shell
+timeout1
+timeout2
+promise resolve
+timeout3
+timeout4
+```
+
+然而，在第 11 版本之前的 Node 中会得到以下结果：
+
+```shell
+timeout1
+timeout2
+timeout3
+timeout4
+promise resolve
+```
+
+在 NodeJS(11)中，`process.nextTick` 回调和其他微任务回调（如 promise）只在事件循环的两个阶段之间才会执行，因此 poromise 会在所有的 timer 回调执行完毕后才执行。
+
+然而，两者输出的不一致也被[讨论](https://github.com/nodejs/node/issues/22257)过，并于 11 版本向浏览器行为靠拢，11 和之后版本的 Node 会得到和浏览器一样的输出顺序。
+
+对比 Node v10.15.1 和 v11.10.0 的结果：
+
+```shell
+> nvm use 10
+Now using node v10.15.1
+> node setimmediates-and-nexttick.js
+timeout 1
+timeout 2
+timeout 3
+timeout 4
+promise resolve
+> nvm use 11
+Now using node v11.10.0
+> node setimmediates-and-nexttick.js
+timeout 1
+timeout 2
+promise resolve
+timeout 3
+timeout 4
+```
+
+这个改动不仅影响 setTimeout，也影响 setImmediate。
+
+比如如下代码：
+
+```js
+setImmediate(() => console.log("immediate1"))
+setImmediate(() => {
+  console.log("immediate2")
+  Promise.resolve().then(() => console.log("promise resolve"))
+})
+setImmediate(() => console.log("immediate3"))
+setImmediate(() => console.log("immediate4"))
+```
+
+Node10 和 11 给出了不同的输出结果：
+
+```shell
+> nvm use 10
+Now using node v10.15.1
+
+> node setimmediates-and-nexttick.js
+immediate 1
+immediate 2
+immediate 3
+immediate 4
+promise resolve
+
+> nvm use 11
+Now using node v11.10.0
+
+> node setimmediates-and-nexttick.js
+immediate 1
+immediate 2
+promise resolve
+immediate 3
+immediate 4
+```
+
+将 Promise.resolve.then 换成 process.nextTick 后，输出顺序也一样。再来看一个例子：
+
+```js
+setImmediate(() => console.log("timeout1"))
+setImmediate(() => {
+  console.log("timeout2")
+  process.nextTick(() => console.log("next tick"))
+})
+setImmediate(() => console.log("timeout3"))
+setImmediate(() => console.log("timeout4"))
+```
+
+结果如下
+
+```shell
+> nvm use 10
+Now using node v10.15.1
+
+> node setimmediates-and-nexttick.js
+timeout 1
+timeout 2
+timeout 3
+timeout 4
+
+next tick
+> nvm use 11
+Now using node v11.10.0
+
+> node setimmediates-and-nexttick.js
+timeout 1
+timeout 2
+next tick
+timeout 3
+timeout 4
+```
+
+</Section>
+
+<Section title="总结">
+
+有了 11 版本中的改动，nextTick 和微任务回调将在每个 setTimeout 或 setImmediate 回调执行后执行，即使 timer 或 immediate 队列不为空。这一操作增加了浏览器和 Node 之间的代码重用性。
+
+</Section>

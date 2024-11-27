@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import "./light.css";
+@import "./dark.css";
+@import "./ui.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+html.light {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  /* font-family: Arial, Helvetica, sans-serif; */
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* reset or default styles */
+@layer base {
+  a {
+    text-decoration: none;
+    @apply text-[#d23669] dark:text-[#ffa7c4];
+  }
+  a:hover {
+    text-decoration: underline;
+    text-underline-offset: 0.25rem;
+  }
+
+  button {
+    @apply inline-flex justify-center items-center;
+    @apply rounded break-keep whitespace-nowrap;
+  }
+
+  input[type="text"],
+  input[type="search"] {
+    @apply w-full border rounded p-2 text-base;
+    @apply text-input-text-foreground;
+    @apply bg-input-text-background;
+    @apply border-input-text-border-color;
+    @apply focus:outline-none focus:ring-1 focus:border-blue-500 focus:ring-blue-500;
+  }
+  input[type="search"] {
+    outline-offset: 0;
+  }
+  input[type="checkbox"] {
+    @apply w-4 h-4;
+  }
+
+  select {
+    @apply border border-neutral-600 rounded p-0.5 focus:outline-none;
+  }
+
+  u {
+    text-underline-offset: 0.25rem;
+  }
+}
+
+/* class-based styles that you want to be able to override with utilities */
+@layer components {
+  .content-label {
+    @apply font-bold text-label-color mb-[7px] border-b border-label-border-color pb-1;
+  }
+}
+
+/* small, single-purpose classes that should always take precedence over any other styles */
+@layer utilities {
+  .no-focus-ring-shadow:focus {
+    --tw-ring-shadow: 0 0 #000 !important;
+  }
+}
