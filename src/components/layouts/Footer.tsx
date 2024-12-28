@@ -17,6 +17,13 @@ const Footer = () => {
           私信
         </ExternalLink>
       </p>
+      <hr className="my-2" />
+      <p>
+        ICP备案号：
+        <a href="https://beian.miit.gov.cn/" target="_blank">
+          京ICP备2024101464号-1
+        </a>
+      </p>
     </footer>
   )
 }
