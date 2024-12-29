@@ -10,7 +10,7 @@ const Resume = () => {
       {/*  */}
 
       <header className="flex justify-between mb-4">
-        <div className="flex flex-col justify-evenly items-center">
+        <div className="flex flex-col justify-evenly items-center text-label-color">
           <h3 className="text-xl sm:text-3xl font-bold">党子寅</h3>
           <h4 className="text-2xl sm:text-4xl font-bold">React 前端</h4>
         </div>
@@ -135,7 +135,7 @@ const Resume = () => {
               <li>后端使用 Redis 缓存用户注册验证码</li>
               <li>后端用 nodemailer 向用户邮箱发送验证码</li>
               <li>后端用 crypto 和 JWT 加密用户密码和登录密匙</li>
-              <li>用 accessToken 和 refreshToken 增强用户安全</li>
+              <li>用 accessToken 和 refreshToken 增强用户安全和持久化登录</li>
               <li>用 socket.io 实现简单聊天功能</li>
             </ul>
           </div>
